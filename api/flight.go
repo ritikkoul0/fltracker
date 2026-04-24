@@ -39,7 +39,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	urlDate := strings.ReplaceAll(targetStr, "-", "")
 	centerDate, _ := time.Parse(layout, targetStr)
 
-	// 1. Generate the 7-day window (07-05 to 13-05)
+	// 1. Setup Window (±3 days)
 	allowedDates := make(map[string]bool)
 	for i := -3; i <= 3; i++ {
 		d := centerDate.AddDate(0, 0, i)
@@ -53,23 +53,21 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("apikey", "ixiweb!2$")
 	req.Header.Set("clientid", "ixiweb")
-	req.Header.Set("ixisrc", "ixiweb")
 	req.Header.Set("user-agent", "Mozilla/5.0")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		http.Error(w, "API Failed", 500)
+		http.Error(w, "Ixigo API Error", 500)
 		return
 	}
 	defer resp.Body.Close()
 
 	var rawResponse IxigoResponse
 	if err := json.NewDecoder(resp.Body).Decode(&rawResponse); err != nil {
-		http.Error(w, "Decode Failed", 500)
+		http.Error(w, "JSON Error", 500)
 		return
 	}
 
-	// 3. Filter and Sort Chronologically
 	var windowFlights []IxigoResult
 	for _, f := range rawResponse.Data.Going.Results {
 		if allowedDates[f.Date] {
@@ -77,41 +75,48 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 3. Sort Chronologically
 	sort.Slice(windowFlights, func(i, j int) bool {
 		t1, _ := time.Parse(layout, windowFlights[i].Date)
 		t2, _ := time.Parse(layout, windowFlights[j].Date)
 		return t1.Before(t2)
 	})
 
-	// 4. Change Detection via Redis Fingerprint
+	// 4. Redis Logic using REDIS_URL
+	redisURL := os.Getenv("REDIS_URL")
+	if redisURL == "" {
+		fmt.Println("Error: REDIS_URL not found in environment")
+		http.Error(w, "Missing REDIS_URL", 500)
+		return
+	}
+
+	opts, err := redis.ParseURL(redisURL)
+	if err != nil {
+		fmt.Printf("Error parsing REDIS_URL: %v\n", err)
+		http.Error(w, "Invalid REDIS_URL", 500)
+		return
+	}
+
+	rdb := redis.NewClient(opts)
+	defer rdb.Close()
+
+	// Create Price Fingerprint
 	var currentFares []string
 	for _, f := range windowFlights {
 		currentFares = append(currentFares, fmt.Sprintf("%.0f", f.Fare))
 	}
 	newFingerprint := strings.Join(currentFares, "|")
 
-	// Connect to Redis
-	kvURL := os.Getenv("KV_URL")
-	opts, err := redis.ParseURL(kvURL)
-	if err != nil {
-		http.Error(w, "Redis Config Error", 500)
-		return
-	}
-	rdb := redis.NewClient(opts)
-
-	// Check against previous state
+	// Compare State
 	oldFingerprint, _ := rdb.Get(ctx, "flight_window_state").Result()
 
 	if newFingerprint != oldFingerprint && len(windowFlights) > 0 {
-		// Update Redis and Notify Discord
+		// Only Notify on Change
 		rdb.Set(ctx, "flight_window_state", newFingerprint, 0)
 		sendToDiscord(targetStr, windowFlights)
-		
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"success","action":"notified"}`)
+		w.Write([]byte(`{"status":"success","action":"notified"}`))
 	} else {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"success","action":"skipped_no_change"}`)
+		w.Write([]byte(`{"status":"success","action":"skipped_no_change"}`))
 	}
 }
 
@@ -122,7 +127,7 @@ func sendToDiscord(centerDate string, flights []IxigoResult) {
 	var fields []map[string]interface{}
 	for _, f := range flights {
 		airline := f.Airline
-		if airline == "" { airline = "Details Pending" }
+		if airline == "" { airline = "Pending" }
 		
 		fields = append(fields, map[string]interface{}{
 			"name":   fmt.Sprintf("📅 %s", f.Date),
@@ -134,11 +139,10 @@ func sendToDiscord(centerDate string, flights []IxigoResult) {
 	payload := map[string]interface{}{
 		"embeds": []interface{}{
 			map[string]interface{}{
-				"title":       "🔔 Price Change Alert: ±3 Day Window",
-				"description": fmt.Sprintf("Fares updated for the week of %s", centerDate),
-				"color":       15105570, // Orange
+				"title":       "✈️ Price Update: SXR ➔ BLR",
+				"description": fmt.Sprintf("Price changes detected for travel around %s", centerDate),
+				"color":       3066993,
 				"fields":      fields,
-				"footer":      map[string]interface{}{"text": "Flight Monitor • " + time.Now().Format("15:04")},
 			},
 		},
 	}
