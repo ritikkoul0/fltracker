@@ -36,8 +36,8 @@ var ctx = context.Background()
 func Handler(w http.ResponseWriter, r *http.Request) {
 	const layout = "02-01-2006"
 	targetStr := "18-05-2026"
-	origin="BLR"
-	dest="SXR"
+	origin:="BLR"
+	dest:="SXR"
 	urlDate := strings.ReplaceAll(targetStr, "-", "")
 	centerDate, _ := time.Parse(layout, targetStr)
 
