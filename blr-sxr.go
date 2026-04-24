@@ -36,6 +36,8 @@ var ctx = context.Background()
 func Handler(w http.ResponseWriter, r *http.Request) {
 	const layout = "02-01-2006"
 	targetStr := "18-05-2026"
+	origin="BLR"
+	dest="SXR"
 	urlDate := strings.ReplaceAll(targetStr, "-", "")
 	centerDate, _ := time.Parse(layout, targetStr)
 
@@ -47,8 +49,12 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Fetch Data
-	url := fmt.Sprintf("https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=%s&destination=SXR&fareClass=e&origin=BLR&paxCombinationType=100&refundTypes=REFUNDABLE%%2CNON_REFUNDABLE%%2CPARTIALLY_REFUNDABLE", urlDate)
-	
+	url := fmt.Sprintf(
+		"https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=%s&destination=%s&fareClass=e&origin=%s&paxCombinationType=100&refundTypes=REFUNDABLE%%2CNON_REFUNDABLE%%2CPARTIALLY_REFUNDABLE", 
+		urlDate, 
+		dest, 
+		origin,
+	)
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("apikey", "ixiweb!2$")
