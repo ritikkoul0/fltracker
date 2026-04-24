@@ -29,14 +29,13 @@ type IxigoResponse struct {
 }
 
 func Handler(w http.ResponseWriter, r *http.Request) {
-	// Target date for the flight search
-	targetDate := "10-05-2026" 
+	targetDate := "10-05-2026"
 	url := "https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=10052026&destination=BLR&fareClass=e&origin=SXR&paxCombinationType=100"
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
 
-	// Required Headers for Ixigo API
+	// Headers
 	req.Header.Set("apikey", "ixiweb!2$")
 	req.Header.Set("clientid", "ixiweb")
 	req.Header.Set("uuid", "d07889cb18b346a0ac58")
@@ -45,56 +44,61 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		http.Error(w, "API Connection Failed", http.StatusInternalServerError)
+		http.Error(w, "API Connection Failed", 500)
 		return
 	}
 	defer resp.Body.Close()
 
-	var result IxigoResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		http.Error(w, "JSON Decode Failed", http.StatusInternalServerError)
+	var rawResponse IxigoResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rawResponse); err != nil {
+		http.Error(w, "JSON Decode Failed", 500)
 		return
 	}
 
-	// 1. Filter: Match Date AND Ensure Airline info is NOT empty
-	var dayFlights []IxigoResult
-	for _, f := range result.Data.Going.Results {
-		// Strict check: Date must match and we must have a valid Airline & Flight Number
-		if f.Date == targetDate && f.Airline != "" && f.FlightNumber != "" {
-			dayFlights = append(dayFlights, f)
+	// --- 1. Sanitization Phase ---
+	// Remove any entries that lack airline info immediately
+	var cleanFlights []IxigoResult
+	for _, f := range rawResponse.Data.Going.Results {
+		if f.Airline != "" && f.FlightNumber != "" && f.AirlineCode != "" {
+			cleanFlights = append(cleanFlights, f)
 		}
 	}
 
-	// 2. Sort by Fare (Cheapest first)
-	sort.Slice(dayFlights, func(i, j int) bool {
-		return dayFlights[i].Fare < dayFlights[j].Fare
+	// --- 2. Processing Phase (Now working only with valid data) ---
+	var targetFlights []IxigoResult
+	for _, f := range cleanFlights {
+		if f.Date == targetDate {
+			targetFlights = append(targetFlights, f)
+		}
+	}
+
+	// Sort by Fare
+	sort.Slice(targetFlights, func(i, j int) bool {
+		return targetFlights[i].Fare < targetFlights[j].Fare
 	})
 
-	// 3. Take Top 5
+	// Take Top 5
 	limit := 5
-	if len(dayFlights) < 5 {
-		limit = len(dayFlights)
+	if len(targetFlights) < 5 {
+		limit = len(targetFlights)
 	}
 
-	var finalSelection []IxigoResult
-	if len(dayFlights) > 0 {
-		finalSelection = dayFlights[:limit]
-		sendToDiscord(targetDate, finalSelection)
+	if len(targetFlights) > 0 {
+		sendToDiscord(targetDate, targetFlights[:limit])
 	}
 
-	// Output result summary to the browser/logs
+	// Final Response
 	w.Header().Set("Content-Type", "application/json")
-	responseMsg := fmt.Sprintf(`{"status":"success","date":"%s","verified_count":%d}`, targetDate, len(finalSelection))
-	w.Write([]byte(responseMsg))
+	fmt.Fprintf(w, `{"status":"success","date":"%s","total_verified_in_response":%d,"target_date_count":%d}`, 
+		targetDate, len(cleanFlights), len(targetFlights))
 }
 
 func sendToDiscord(date string, flights []IxigoResult) {
 	webhookURL := os.Getenv("DISCORD_WEBHOOK_URL")
 	if webhookURL == "" {
-		fmt.Println("Error: DISCORD_WEBHOOK_URL not set")
 		return
 	}
-	
+
 	var fields []map[string]interface{}
 	for i, f := range flights {
 		fields = append(fields, map[string]interface{}{
@@ -108,17 +112,14 @@ func sendToDiscord(date string, flights []IxigoResult) {
 		"embeds": []interface{}{
 			map[string]interface{}{
 				"title":       fmt.Sprintf("✈️ Verified Flight Options for %s", date),
-				"description": "SXR ➔ BLR (Verified Carriers Only)",
-				"color":       3066993, // Greenish-Blue
+				"description": "SXR ➔ BLR",
+				"color":       3066993,
 				"fields":      fields,
-				"footer":      map[string]interface{}{"text": "Flight Monitor • " + time.Now().Format("15:04")},
+				"footer":      map[string]interface{}{"text": "Vercel Monitor • " + time.Now().Format("15:04")},
 			},
 		},
 	}
 
 	body, _ := json.Marshal(payload)
-	_, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(body))
-	if err != nil {
-		fmt.Printf("Error sending to Discord: %v\n", err)
-	}
+	http.Post(webhookURL, "application/json", bytes.NewBuffer(body))
 }
