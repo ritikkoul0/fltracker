@@ -29,18 +29,18 @@ type IxigoResponse struct {
 }
 
 func Handler(w http.ResponseWriter, r *http.Request) {
-	targetDate := "09-05-2026"
-	// Updated URL with your exact parameters
-	url := "https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=09052026&destination=BLR&fareClass=e&origin=SXR&paxCombinationType=100&refundTypes=REFUNDABLE%2CNON_REFUNDABLE%2CPARTIALLY_REFUNDABLE"
+	// 1. Configuration
+	targetDate := "10-05-2026"
+	url := "https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=10052026&destination=BLR&fareClass=e&origin=SXR&paxCombinationType=100&refundTypes=REFUNDABLE%2CNON_REFUNDABLE%2CPARTIALLY_REFUNDABLE"
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
 
-	// Set Headers exactly as per your curl request
+	// Set Headers exactly as per your successful curl
 	req.Header.Set("accept", "*/*")
 	req.Header.Set("apikey", "ixiweb!2$")
 	req.Header.Set("clientid", "ixiweb")
-	req.Header.Set("ixisrc", "ixiweb") // Added this from your curl
+	req.Header.Set("ixisrc", "ixiweb")
 	req.Header.Set("uuid", "d07889cb18b346a0ac58")
 	req.Header.Set("deviceid", "d07889cb18b346a0ac58")
 	req.Header.Set("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
@@ -58,42 +58,34 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- 1. Sanitization Phase ---
-	// Immediately remove any results that don't have real airline data
-	var cleanFlights []IxigoResult
+	// 2. Filter: Only Target Date AND Only Valid Airlines
+	var validFlights []IxigoResult
 	for _, f := range rawResponse.Data.Going.Results {
-		if f.Airline != "" && f.FlightNumber != "" && f.AirlineCode != "" {
-			cleanFlights = append(cleanFlights, f)
+		if f.Date == targetDate && f.Airline != "" && f.FlightNumber != "" {
+			validFlights = append(validFlights, f)
 		}
 	}
 
-	// --- 2. Filter for Target Date ---
-	var targetFlights []IxigoResult
-	for _, f := range cleanFlights {
-		if f.Date == targetDate {
-			targetFlights = append(targetFlights, f)
-		}
-	}
-
-	// --- 3. Sorting & Limit ---
-	sort.Slice(targetFlights, func(i, j int) bool {
-		return targetFlights[i].Fare < targetFlights[j].Fare
+	// 3. Sort: Cheapest First
+	sort.Slice(validFlights, func(i, j int) bool {
+		return validFlights[i].Fare < validFlights[j].Fare
 	})
 
+	// 4. Limit: Top 5
 	limit := 5
-	if len(targetFlights) < 5 {
-		limit = len(targetFlights)
+	if len(validFlights) < 5 {
+		limit = len(validFlights)
+	}
+	finalSelection := validFlights[:limit]
+
+	// 5. Notification
+	if len(finalSelection) > 0 {
+		sendToDiscord(targetDate, finalSelection)
 	}
 
-	// Only send to Discord if a verified flight for the 10th exists
-	if len(targetFlights) > 0 {
-		sendToDiscord(targetDate, targetFlights[:limit])
-	}
-
-	// Output summary
+	// 6. Response for Browser/Logs
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"status":"success","date":"%s","total_verified_in_response":%d,"target_date_verified_count":%d}`, 
-		targetDate, len(cleanFlights), len(targetFlights))
+	fmt.Fprintf(w, `{"status":"success","date":"%s","found_count":%d}`, targetDate, len(finalSelection))
 }
 
 func sendToDiscord(date string, flights []IxigoResult) {
@@ -114,11 +106,11 @@ func sendToDiscord(date string, flights []IxigoResult) {
 	payload := map[string]interface{}{
 		"embeds": []interface{}{
 			map[string]interface{}{
-				"title":       fmt.Sprintf("✈️ Verified Flight Options for %s", date),
-				"description": "SXR ➔ BLR (Verified Carriers Only)",
-				"color":       3066993,
+				"title":       fmt.Sprintf("✈️ Top %d Cheapest Flights for %s", len(flights), date),
+				"description": "Route: SXR ➔ BLR",
+				"color":       3066993, // Greenish-Blue
 				"fields":      fields,
-				"footer":      map[string]interface{}{"text": "Vercel Monitor • " + time.Now().Format("15:04")},
+				"footer":      map[string]interface{}{"text": "Vercel Flight Monitor • " + time.Now().Format("15:04")},
 			},
 		},
 	}
