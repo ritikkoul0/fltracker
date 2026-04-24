@@ -36,8 +36,11 @@ var ctx = context.Background()
 func Handler(w http.ResponseWriter, r *http.Request) {
 	const layout = "02-01-2006"
 	targetStr := "18-05-2026"
-	origin :="SXR"
-	dest :="BLR"
+	
+	// Change these per file
+	origin := "SXR"
+	dest := "BLR"
+
 	urlDate := strings.ReplaceAll(targetStr, "-", "")
 	centerDate, _ := time.Parse(layout, targetStr)
 
@@ -50,9 +53,9 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 	// 2. Fetch Data
 	url := fmt.Sprintf(
-		"https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=%s&destination=%s&fareClass=e&origin=%s&paxCombinationType=100&refundTypes=REFUNDABLE%%2CNON_REFUNDABLE%%2CPARTIALLY_REFUNDABLE", 
-		urlDate, 
-		dest, 
+		"https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=%s&destination=%s&fareClass=e&origin=%s&paxCombinationType=100&refundTypes=REFUNDABLE%%2CNON_REFUNDABLE%%2CPARTIALLY_REFUNDABLE",
+		urlDate,
+		dest,
 		origin,
 	)
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -88,23 +91,25 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return t1.Before(t2)
 	})
 
-	// 4. Redis Logic using REDIS_URL
+	// 4. Redis Logic
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
-		fmt.Println("Error: REDIS_URL not found in environment")
 		http.Error(w, "Missing REDIS_URL", 500)
 		return
 	}
 
 	opts, err := redis.ParseURL(redisURL)
 	if err != nil {
-		fmt.Printf("Error parsing REDIS_URL: %v\n", err)
 		http.Error(w, "Invalid REDIS_URL", 500)
 		return
 	}
 
 	rdb := redis.NewClient(opts)
 	defer rdb.Close()
+
+	// CREATE A UNIQUE KEY FOR THIS SPECIFIC ROUTE
+	// This prevents File A (BLR-SXR) from overwriting File B (DEL-BOM)
+	stateKey := fmt.Sprintf("flights:%s:%s", origin, dest)
 
 	// Create Price Fingerprint
 	var currentFares []string
@@ -113,20 +118,19 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	}
 	newFingerprint := strings.Join(currentFares, "|")
 
-	// Compare State
-	oldFingerprint, _ := rdb.Get(ctx, "flight_window_state").Result()
+	// Compare State using the dynamic key
+	oldFingerprint, _ := rdb.Get(ctx, stateKey).Result()
 
 	if newFingerprint != oldFingerprint && len(windowFlights) > 0 {
-		// Only Notify on Change
-		rdb.Set(ctx, "flight_window_state", newFingerprint, 0)
-		sendToDiscord(targetStr, windowFlights)
+		rdb.Set(ctx, stateKey, newFingerprint, 0)
+		sendToDiscord(targetStr, origin, dest, windowFlights)
 		w.Write([]byte(`{"status":"success","action":"notified"}`))
 	} else {
 		w.Write([]byte(`{"status":"success","action":"skipped_no_change"}`))
 	}
 }
 
-func sendToDiscord(centerDate string, flights []IxigoResult) {
+func sendToDiscord(centerDate, origin, dest string, flights []IxigoResult) {
 	webhookURL := os.Getenv("DISCORD_WEBHOOK_URL")
 	if webhookURL == "" { return }
 
@@ -145,7 +149,7 @@ func sendToDiscord(centerDate string, flights []IxigoResult) {
 	payload := map[string]interface{}{
 		"embeds": []interface{}{
 			map[string]interface{}{
-				"title":       "✈️ Price Update: SXR ➔ BLR",
+				"title":       fmt.Sprintf("✈️ Price Update: %s ➔ %s", origin, dest),
 				"description": fmt.Sprintf("Price changes detected for travel around %s", centerDate),
 				"color":       3066993,
 				"fields":      fields,
