@@ -29,9 +29,9 @@ type IxigoResponse struct {
 }
 
 func Handler(w http.ResponseWriter, r *http.Request) {
-	targetDate := "10-05-2026"
+	targetDate := "09-05-2026"
 	// Updated URL with your exact parameters
-	url := "https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=10052026&destination=BLR&fareClass=e&origin=SXR&paxCombinationType=100&refundTypes=REFUNDABLE%2CNON_REFUNDABLE%2CPARTIALLY_REFUNDABLE"
+	url := "https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=09052026&destination=BLR&fareClass=e&origin=SXR&paxCombinationType=100&refundTypes=REFUNDABLE%2CNON_REFUNDABLE%2CPARTIALLY_REFUNDABLE"
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
