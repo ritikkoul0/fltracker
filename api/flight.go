@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/redis/go-redis/v9" // Add this to your go.mod: go get github.com/redis/go-redis/v9
+	"github.com/redis/go-redis/v9"
 )
 
 // --- Models ---
@@ -78,35 +78,37 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return t1.Before(t2)
 	})
 
-	// 4. CHANGE DETECTION LOGIC
-	// Create a unique fingerprint of current prices (e.g., "12000-13500-11000...")
+	// 4. Change Detection Logic (Always proceeds, but determines status)
 	var currentFingerprint []string
 	for _, f := range windowFlights {
 		currentFingerprint = append(currentFingerprint, fmt.Sprintf("%.0f", f.Fare))
 	}
 	newFingerprint := strings.Join(currentFingerprint, "|")
 
-	// Connect to Vercel KV (Redis)
 	opts, _ := redis.ParseURL(os.Getenv("KV_URL"))
 	rdb := redis.NewClient(opts)
 
-	// Get last saved fingerprint
 	oldFingerprint, _ := rdb.Get(ctx, "flight_price_fingerprint").Result()
-
+	
+	status := "STABLE"
+	color := 3447003 // Blue
+	
 	if newFingerprint != oldFingerprint {
-		// Price changed! Save the new state and notify
+		status = "PRICE CHANGE DETECTED"
+		color = 15105570 // Orange
 		rdb.Set(ctx, "flight_price_fingerprint", newFingerprint, 0)
-		sendToDiscord(targetStr, windowFlights)
-		
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"notified","change":true}`)
-	} else {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"skipped","change":false}`)
 	}
+
+	// 5. Send notification EVERY time
+	if len(windowFlights) > 0 {
+		sendToDiscord(targetStr, windowFlights, status, color)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"status":"notified","price_status":"%s"}`, status)
 }
 
-func sendToDiscord(centerDate string, flights []IxigoResult) {
+func sendToDiscord(centerDate string, flights []IxigoResult, status string, color int) {
 	webhookURL := os.Getenv("DISCORD_WEBHOOK_URL")
 	if webhookURL == "" {
 		return
@@ -127,11 +129,11 @@ func sendToDiscord(centerDate string, flights []IxigoResult) {
 	payload := map[string]interface{}{
 		"embeds": []interface{}{
 			map[string]interface{}{
-				"title":       "🔔 Price Update Detected!",
-				"description": fmt.Sprintf("Fares changed in the window for %s", centerDate),
-				"color":       15105570, // Orange
+				"title":       fmt.Sprintf("✈️ %s: %s (±3 Days)", status, centerDate),
+				"description": "Showing current fares for SXR ➔ BLR",
+				"color":       color,
 				"fields":      fields,
-				"footer":      map[string]interface{}{"text": "Vercel Monitor • " + time.Now().Format("15:04")},
+				"footer":      map[string]interface{}{"text": "Daily Check-in • " + time.Now().Format("15:04")},
 			},
 		},
 	}
