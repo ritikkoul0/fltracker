@@ -18,7 +18,6 @@ type IxigoResult struct {
 	FlightNumber string  `json:"flightNumber"`
 	Date         string  `json:"date"`
 	Fare         float64 `json:"fare"`
-	Found        int64   `json:"found"`
 }
 
 type IxigoResponse struct {
@@ -30,12 +29,11 @@ type IxigoResponse struct {
 }
 
 func Handler(w http.ResponseWriter, r *http.Request) {
-	// 1. Define Target and Window
+	// 1. Setup the Date Window (±3 Days)
 	const layout = "02-01-2006"
 	targetStr := "10-05-2026"
 	centerDate, _ := time.Parse(layout, targetStr)
 
-	// Create a map of allowed dates (3 days before to 3 days after)
 	allowedDates := make(map[string]bool)
 	for i := -3; i <= 3; i++ {
 		d := centerDate.AddDate(0, 0, i)
@@ -47,6 +45,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
 
+	// Headers matching your curl
 	req.Header.Set("accept", "*/*")
 	req.Header.Set("apikey", "ixiweb!2$")
 	req.Header.Set("clientid", "ixiweb")
@@ -68,20 +67,20 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Filter: Valid identifiers AND within the 7-day window
+	// 2. Filter: Only dates within the 07-05 to 13-05 window
 	var windowFlights []IxigoResult
 	for _, f := range rawResponse.Data.Going.Results {
-		if allowedDates[f.Date] && f.Airline != "" && f.AirlineCode != "" && f.FlightNumber != "" {
+		if allowedDates[f.Date] {
 			windowFlights = append(windowFlights, f)
 		}
 	}
 
-	// 3. Sort: Cheapest overall within this window
+	// 3. Sort: Cheapest overall in that 7-day range
 	sort.Slice(windowFlights, func(i, j int) bool {
 		return windowFlights[i].Fare < windowFlights[j].Fare
 	})
 
-	// 4. Limit to Top 5
+	// 4. Take top 5
 	limit := 5
 	if len(windowFlights) < 5 {
 		limit = len(windowFlights)
@@ -93,7 +92,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"status":"success","target":"%s","window_size":7,"found_count":%d}`, targetStr, len(finalSelection))
+	fmt.Fprintf(w, `{"status":"success","range":"07-05 to 13-05","sent_count":%d}`, len(finalSelection))
 }
 
 func sendToDiscord(centerDate string, flights []IxigoResult) {
@@ -104,9 +103,19 @@ func sendToDiscord(centerDate string, flights []IxigoResult) {
 
 	var fields []map[string]interface{}
 	for i, f := range flights {
+		// Fallback text if airline info is missing
+		displayAirline := f.Airline
+		if displayAirline == "" {
+			displayAirline = "Pending Details"
+		}
+		displayFlight := f.FlightNumber
+		if displayFlight == "" {
+			displayFlight = "TBD"
+		}
+
 		fields = append(fields, map[string]interface{}{
-			"name":   fmt.Sprintf("%d. %s - %s", i+1, f.Date, f.Airline),
-			"value":  fmt.Sprintf("💰 Fare: **₹%.0f**\n🔢 Flight: `%s` (%s)", f.Fare, f.FlightNumber, f.AirlineCode),
+			"name":   fmt.Sprintf("%d. %s — %s", i+1, f.Date, displayAirline),
+			"value":  fmt.Sprintf("💰 Fare: **₹%.0f**\n🔢 Flight: `%s`", f.Fare, displayFlight),
 			"inline": false,
 		})
 	}
@@ -114,11 +123,11 @@ func sendToDiscord(centerDate string, flights []IxigoResult) {
 	payload := map[string]interface{}{
 		"embeds": []interface{}{
 			map[string]interface{}{
-				"title":       fmt.Sprintf("✈️ Cheapest Flights (±3 Days of %s)", centerDate),
-				"description": "SXR ➔ BLR | Only verified carriers included",
-				"color":       3066993,
+				"title":       fmt.Sprintf("✈️ Fare Alert: %s (±3 Days)", centerDate),
+				"description": "SXR ➔ BLR Cheapest Options",
+				"color":       15844367, // Yellow/Gold
 				"fields":      fields,
-				"footer":      map[string]interface{}{"text": "Flight Monitor • " + time.Now().Format("15:04")},
+				"footer":      map[string]interface{}{"text": "Vercel Monitor • " + time.Now().Format("15:04")},
 			},
 		},
 	}
