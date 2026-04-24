@@ -2,13 +2,16 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"sort"
-	"strings" // Added strings package
+	"strings"
 	"time"
+
+	"github.com/redis/go-redis/v9" // Add this to your go.mod: go get github.com/redis/go-redis/v9
 )
 
 // --- Models ---
@@ -28,52 +31,39 @@ type IxigoResponse struct {
 	} `json:"data"`
 }
 
+var ctx = context.Background()
+
 func Handler(w http.ResponseWriter, r *http.Request) {
-	// 1. Setup the Date Window
 	const layout = "02-01-2006"
 	targetStr := "10-05-2026"
-	
-	// Convert "10-05-2026" -> "10052026" for the URL
 	urlDate := strings.ReplaceAll(targetStr, "-", "")
-	
 	centerDate, _ := time.Parse(layout, targetStr)
 
-	// Define range: 07-05-2026 to 13-05-2026
+	// 1. Generate the 7-day window
 	allowedDates := make(map[string]bool)
 	for i := -3; i <= 3; i++ {
 		d := centerDate.AddDate(0, 0, i)
 		allowedDates[d.Format(layout)] = true
 	}
 
-	// Dynamic URL using urlDate
+	// 2. Fetch Data
 	url := fmt.Sprintf("https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=%s&destination=BLR&fareClass=e&origin=SXR&paxCombinationType=100&refundTypes=REFUNDABLE%%2CNON_REFUNDABLE%%2CPARTIALLY_REFUNDABLE", urlDate)
-
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
-
-	// Headers
-	req.Header.Set("accept", "*/*")
 	req.Header.Set("apikey", "ixiweb!2$")
 	req.Header.Set("clientid", "ixiweb")
-	req.Header.Set("ixisrc", "ixiweb")
-	req.Header.Set("uuid", "d07889cb18b346a0ac58")
-	req.Header.Set("deviceid", "d07889cb18b346a0ac58")
-	req.Header.Set("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
+	req.Header.Set("user-agent", "Mozilla/5.0")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		http.Error(w, "API Connection Failed", 500)
+		http.Error(w, "API Failed", 500)
 		return
 	}
 	defer resp.Body.Close()
 
 	var rawResponse IxigoResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rawResponse); err != nil {
-		http.Error(w, "JSON Decode Failed", 500)
-		return
-	}
+	json.NewDecoder(resp.Body).Decode(&rawResponse)
 
-	// 2. Filter: Grab everything in the 7-day window
 	var windowFlights []IxigoResult
 	for _, f := range rawResponse.Data.Going.Results {
 		if allowedDates[f.Date] {
@@ -81,20 +71,39 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 3. Sort: Chronological Order (By Date Ascending)
+	// 3. Sort Chronologically
 	sort.Slice(windowFlights, func(i, j int) bool {
 		t1, _ := time.Parse(layout, windowFlights[i].Date)
 		t2, _ := time.Parse(layout, windowFlights[j].Date)
 		return t1.Before(t2)
 	})
 
-	// 4. Send to Discord
-	if len(windowFlights) > 0 {
-		sendToDiscord(targetStr, windowFlights)
+	// 4. CHANGE DETECTION LOGIC
+	// Create a unique fingerprint of current prices (e.g., "12000-13500-11000...")
+	var currentFingerprint []string
+	for _, f := range windowFlights {
+		currentFingerprint = append(currentFingerprint, fmt.Sprintf("%.0f", f.Fare))
 	}
+	newFingerprint := strings.Join(currentFingerprint, "|")
 
-	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"status":"success","url_used":"%s","count":%d}`, url, len(windowFlights))
+	// Connect to Vercel KV (Redis)
+	opts, _ := redis.ParseURL(os.Getenv("KV_URL"))
+	rdb := redis.NewClient(opts)
+
+	// Get last saved fingerprint
+	oldFingerprint, _ := rdb.Get(ctx, "flight_price_fingerprint").Result()
+
+	if newFingerprint != oldFingerprint {
+		// Price changed! Save the new state and notify
+		rdb.Set(ctx, "flight_price_fingerprint", newFingerprint, 0)
+		sendToDiscord(targetStr, windowFlights)
+		
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"notified","change":true}`)
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"skipped","change":false}`)
+	}
 }
 
 func sendToDiscord(centerDate string, flights []IxigoResult) {
@@ -106,18 +115,11 @@ func sendToDiscord(centerDate string, flights []IxigoResult) {
 	var fields []map[string]interface{}
 	for _, f := range flights {
 		airline := f.Airline
-		if airline == "" {
-			airline = "Details Pending"
-		}
+		if airline == "" { airline = "Pending" }
 		
-		flightNum := f.FlightNumber
-		if flightNum == "" {
-			flightNum = "TBD"
-		}
-
 		fields = append(fields, map[string]interface{}{
 			"name":   fmt.Sprintf("📅 %s", f.Date),
-			"value":  fmt.Sprintf("💰 Fare: **₹%.0f**\n✈️ %s (`%s`)", f.Fare, airline, flightNum),
+			"value":  fmt.Sprintf("💰 **₹%.0f**\n✈️ %s", f.Fare, airline),
 			"inline": true,
 		})
 	}
@@ -125,9 +127,9 @@ func sendToDiscord(centerDate string, flights []IxigoResult) {
 	payload := map[string]interface{}{
 		"embeds": []interface{}{
 			map[string]interface{}{
-				"title":       fmt.Sprintf("✈️ Weekly Fare Outlook: %s", centerDate),
-				"description": "SXR ➔ BLR (Window: -3 to +3 days)",
-				"color":       3447003,
+				"title":       "🔔 Price Update Detected!",
+				"description": fmt.Sprintf("Fares changed in the window for %s", centerDate),
+				"color":       15105570, // Orange
 				"fields":      fields,
 				"footer":      map[string]interface{}{"text": "Vercel Monitor • " + time.Now().Format("15:04")},
 			},
