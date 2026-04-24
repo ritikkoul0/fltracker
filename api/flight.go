@@ -7,11 +7,11 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings" // Added strings package
 	"time"
 )
 
 // --- Models ---
-
 type IxigoResult struct {
 	Airline      string  `json:"airline"`
 	AirlineCode  string  `json:"airlineCode"`
@@ -29,9 +29,13 @@ type IxigoResponse struct {
 }
 
 func Handler(w http.ResponseWriter, r *http.Request) {
-	// 1. Setup the Date Window (±3 Days of May 10)
+	// 1. Setup the Date Window
 	const layout = "02-01-2006"
 	targetStr := "10-05-2026"
+	
+	// Convert "10-05-2026" -> "10052026" for the URL
+	urlDate := strings.ReplaceAll(targetStr, "-", "")
+	
 	centerDate, _ := time.Parse(layout, targetStr)
 
 	// Define range: 07-05-2026 to 13-05-2026
@@ -41,7 +45,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		allowedDates[d.Format(layout)] = true
 	}
 
-	url := "https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=10052026&destination=BLR&fareClass=e&origin=SXR&paxCombinationType=100&refundTypes=REFUNDABLE%2CNON_REFUNDABLE%2CPARTIALLY_REFUNDABLE"
+	// Dynamic URL using urlDate
+	url := fmt.Sprintf("https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=%s&destination=BLR&fareClass=e&origin=SXR&paxCombinationType=100&refundTypes=REFUNDABLE%%2CNON_REFUNDABLE%%2CPARTIALLY_REFUNDABLE", urlDate)
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
@@ -83,13 +88,13 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return t1.Before(t2)
 	})
 
-	// 4. Send the results to Discord (No limit, or keep it to 7 for the whole week)
+	// 4. Send to Discord
 	if len(windowFlights) > 0 {
 		sendToDiscord(targetStr, windowFlights)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"status":"success","info":"Sorted by date ascending","count":%d}`, len(windowFlights))
+	fmt.Fprintf(w, `{"status":"success","url_used":"%s","count":%d}`, url, len(windowFlights))
 }
 
 func sendToDiscord(centerDate string, flights []IxigoResult) {
@@ -113,7 +118,7 @@ func sendToDiscord(centerDate string, flights []IxigoResult) {
 		fields = append(fields, map[string]interface{}{
 			"name":   fmt.Sprintf("📅 %s", f.Date),
 			"value":  fmt.Sprintf("💰 Fare: **₹%.0f**\n✈️ %s (`%s`)", f.Fare, airline, flightNum),
-			"inline": true, // Using inline true to save vertical space for a weekly view
+			"inline": true,
 		})
 	}
 
@@ -122,7 +127,7 @@ func sendToDiscord(centerDate string, flights []IxigoResult) {
 			map[string]interface{}{
 				"title":       fmt.Sprintf("✈️ Weekly Fare Outlook: %s", centerDate),
 				"description": "SXR ➔ BLR (Window: -3 to +3 days)",
-				"color":       3447003, // Nice Blue
+				"color":       3447003,
 				"fields":      fields,
 				"footer":      map[string]interface{}{"text": "Vercel Monitor • " + time.Now().Format("15:04")},
 			},
