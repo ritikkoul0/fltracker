@@ -18,7 +18,7 @@ type IxigoResult struct {
 	FlightNumber string  `json:"flightNumber"`
 	Date         string  `json:"date"`
 	Fare         float64 `json:"fare"`
-	Found        int64   `json:"found"` // Timestamp of when the flight was added/found
+	Found        int64   `json:"found"`
 }
 
 type IxigoResponse struct {
@@ -30,12 +30,23 @@ type IxigoResponse struct {
 }
 
 func Handler(w http.ResponseWriter, r *http.Request) {
+	// 1. Define Target and Window
+	const layout = "02-01-2006"
+	targetStr := "10-05-2026"
+	centerDate, _ := time.Parse(layout, targetStr)
+
+	// Create a map of allowed dates (3 days before to 3 days after)
+	allowedDates := make(map[string]bool)
+	for i := -3; i <= 3; i++ {
+		d := centerDate.AddDate(0, 0, i)
+		allowedDates[d.Format(layout)] = true
+	}
+
 	url := "https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=10052026&destination=BLR&fareClass=e&origin=SXR&paxCombinationType=100&refundTypes=REFUNDABLE%2CNON_REFUNDABLE%2CPARTIALLY_REFUNDABLE"
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
 
-	// Headers matching your successful curl
 	req.Header.Set("accept", "*/*")
 	req.Header.Set("apikey", "ixiweb!2$")
 	req.Header.Set("clientid", "ixiweb")
@@ -57,37 +68,35 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Step: Filter out empty placeholders
-	var verifiedFlights []IxigoResult
+	// 2. Filter: Valid identifiers AND within the 7-day window
+	var windowFlights []IxigoResult
 	for _, f := range rawResponse.Data.Going.Results {
-		// Only consider if Airline and Flight Number are present
-		if f.Airline != "" && f.AirlineCode != "" && f.FlightNumber != "" && f.Fare > 0 {
-			verifiedFlights = append(verifiedFlights, f)
+		if allowedDates[f.Date] && f.Airline != "" && f.AirlineCode != "" && f.FlightNumber != "" {
+			windowFlights = append(windowFlights, f)
 		}
 	}
 
-	// 2. Step: Sort the entire verified list by Fare (Cheapest first)
-	sort.Slice(verifiedFlights, func(i, j int) bool {
-		return verifiedFlights[i].Fare < verifiedFlights[j].Fare
+	// 3. Sort: Cheapest overall within this window
+	sort.Slice(windowFlights, func(i, j int) bool {
+		return windowFlights[i].Fare < windowFlights[j].Fare
 	})
 
-	// 3. Step: Take the Top 5 overall cheapest
+	// 4. Limit to Top 5
 	limit := 5
-	if len(verifiedFlights) < 5 {
-		limit = len(verifiedFlights)
+	if len(windowFlights) < 5 {
+		limit = len(windowFlights)
 	}
-	finalSelection := verifiedFlights[:limit]
+	finalSelection := windowFlights[:limit]
 
-	// 4. Step: Send to Discord if data exists
 	if len(finalSelection) > 0 {
-		sendToDiscord(finalSelection)
+		sendToDiscord(targetStr, finalSelection)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"status":"success","total_verified":%d,"top_cheapest_sent":%d}`, len(verifiedFlights), len(finalSelection))
+	fmt.Fprintf(w, `{"status":"success","target":"%s","window_size":7,"found_count":%d}`, targetStr, len(finalSelection))
 }
 
-func sendToDiscord(flights []IxigoResult) {
+func sendToDiscord(centerDate string, flights []IxigoResult) {
 	webhookURL := os.Getenv("DISCORD_WEBHOOK_URL")
 	if webhookURL == "" {
 		return
@@ -95,12 +104,9 @@ func sendToDiscord(flights []IxigoResult) {
 
 	var fields []map[string]interface{}
 	for i, f := range flights {
-		// Convert the 'found' timestamp to a readable format if you want to see when it was added
-		foundTime := time.Unix(f.Found/1000, 0).Format("02 Jan 15:04")
-
 		fields = append(fields, map[string]interface{}{
-			"name":   fmt.Sprintf("%d. %s (%s) - Travel Date: %s", i+1, f.Airline, f.AirlineCode, f.Date),
-			"value":  fmt.Sprintf("💰 Fare: **₹%.0f**\n🔢 Flight: `%s`\n🕒 Added: `%s`", f.Fare, f.FlightNumber, foundTime),
+			"name":   fmt.Sprintf("%d. %s - %s", i+1, f.Date, f.Airline),
+			"value":  fmt.Sprintf("💰 Fare: **₹%.0f**\n🔢 Flight: `%s` (%s)", f.Fare, f.FlightNumber, f.AirlineCode),
 			"inline": false,
 		})
 	}
@@ -108,8 +114,8 @@ func sendToDiscord(flights []IxigoResult) {
 	payload := map[string]interface{}{
 		"embeds": []interface{}{
 			map[string]interface{}{
-				"title":       "✈️ 5 Cheapest Verified Flights (Any Date)",
-				"description": "SXR ➔ BLR ranked by price",
+				"title":       fmt.Sprintf("✈️ Cheapest Flights (±3 Days of %s)", centerDate),
+				"description": "SXR ➔ BLR | Only verified carriers included",
 				"color":       3066993,
 				"fields":      fields,
 				"footer":      map[string]interface{}{"text": "Flight Monitor • " + time.Now().Format("15:04")},
