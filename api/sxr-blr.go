@@ -35,7 +35,7 @@ var ctx = context.Background()
 
 func Handler(w http.ResponseWriter, r *http.Request) {
 	const layout = "02-01-2006"
-	targetStr := "18-05-2026"
+	targetStr := "15-05-2026"
 	
 	// Change these per file
 	origin := "SXR"
