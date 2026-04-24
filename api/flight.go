@@ -30,14 +30,17 @@ type IxigoResponse struct {
 
 func Handler(w http.ResponseWriter, r *http.Request) {
 	targetDate := "10-05-2026"
-	url := "https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=10052026&destination=BLR&fareClass=e&origin=SXR&paxCombinationType=100"
+	// Updated URL with your exact parameters
+	url := "https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=10052026&destination=BLR&fareClass=e&origin=SXR&paxCombinationType=100&refundTypes=REFUNDABLE%2CNON_REFUNDABLE%2CPARTIALLY_REFUNDABLE"
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
 
-	// Headers
+	// Set Headers exactly as per your curl request
+	req.Header.Set("accept", "*/*")
 	req.Header.Set("apikey", "ixiweb!2$")
 	req.Header.Set("clientid", "ixiweb")
+	req.Header.Set("ixisrc", "ixiweb") // Added this from your curl
 	req.Header.Set("uuid", "d07889cb18b346a0ac58")
 	req.Header.Set("deviceid", "d07889cb18b346a0ac58")
 	req.Header.Set("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
@@ -56,7 +59,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// --- 1. Sanitization Phase ---
-	// Remove any entries that lack airline info immediately
+	// Immediately remove any results that don't have real airline data
 	var cleanFlights []IxigoResult
 	for _, f := range rawResponse.Data.Going.Results {
 		if f.Airline != "" && f.FlightNumber != "" && f.AirlineCode != "" {
@@ -64,7 +67,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// --- 2. Processing Phase (Now working only with valid data) ---
+	// --- 2. Filter for Target Date ---
 	var targetFlights []IxigoResult
 	for _, f := range cleanFlights {
 		if f.Date == targetDate {
@@ -72,24 +75,24 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Sort by Fare
+	// --- 3. Sorting & Limit ---
 	sort.Slice(targetFlights, func(i, j int) bool {
 		return targetFlights[i].Fare < targetFlights[j].Fare
 	})
 
-	// Take Top 5
 	limit := 5
 	if len(targetFlights) < 5 {
 		limit = len(targetFlights)
 	}
 
+	// Only send to Discord if a verified flight for the 10th exists
 	if len(targetFlights) > 0 {
 		sendToDiscord(targetDate, targetFlights[:limit])
 	}
 
-	// Final Response
+	// Output summary
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"status":"success","date":"%s","total_verified_in_response":%d,"target_date_count":%d}`, 
+	fmt.Fprintf(w, `{"status":"success","date":"%s","total_verified_in_response":%d,"target_date_verified_count":%d}`, 
 		targetDate, len(cleanFlights), len(targetFlights))
 }
 
@@ -112,7 +115,7 @@ func sendToDiscord(date string, flights []IxigoResult) {
 		"embeds": []interface{}{
 			map[string]interface{}{
 				"title":       fmt.Sprintf("✈️ Verified Flight Options for %s", date),
-				"description": "SXR ➔ BLR",
+				"description": "SXR ➔ BLR (Verified Carriers Only)",
 				"color":       3066993,
 				"fields":      fields,
 				"footer":      map[string]interface{}{"text": "Vercel Monitor • " + time.Now().Format("15:04")},
