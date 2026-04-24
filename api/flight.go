@@ -29,14 +29,14 @@ type IxigoResponse struct {
 }
 
 func Handler(w http.ResponseWriter, r *http.Request) {
-	// 1. Configuration
+	// 1. Setup Request
 	targetDate := "10-05-2026"
 	url := "https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=10052026&destination=BLR&fareClass=e&origin=SXR&paxCombinationType=100&refundTypes=REFUNDABLE%2CNON_REFUNDABLE%2CPARTIALLY_REFUNDABLE"
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
 
-	// Set Headers exactly as per your successful curl
+	// Required Headers from your curl
 	req.Header.Set("accept", "*/*")
 	req.Header.Set("apikey", "ixiweb!2$")
 	req.Header.Set("clientid", "ixiweb")
@@ -45,47 +45,49 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	req.Header.Set("deviceid", "d07889cb18b346a0ac58")
 	req.Header.Set("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
 
+	// 2. Hit API
 	resp, err := client.Do(req)
 	if err != nil {
-		http.Error(w, "API Connection Failed", 500)
+		http.Error(w, "Failed to reach Ixigo", 500)
 		return
 	}
 	defer resp.Body.Close()
 
 	var rawResponse IxigoResponse
 	if err := json.NewDecoder(resp.Body).Decode(&rawResponse); err != nil {
-		http.Error(w, "JSON Decode Failed", 500)
+		http.Error(w, "Failed to decode JSON", 500)
 		return
 	}
 
-	// 2. Filter: Only Target Date AND Only Valid Airlines
-	var validFlights []IxigoResult
+	// 3. Filter: Skip if Airline, Code, or FlightNumber is empty
+	var filtered []IxigoResult
 	for _, f := range rawResponse.Data.Going.Results {
-		if f.Date == targetDate && f.Airline != "" && f.FlightNumber != "" {
-			validFlights = append(validFlights, f)
+		// Rule: Only target date AND skip empty identifiers
+		if f.Date == targetDate && f.Airline != "" && f.AirlineCode != "" && f.FlightNumber != "" && f.Fare > 0 {
+			filtered = append(filtered, f)
 		}
 	}
 
-	// 3. Sort: Cheapest First
-	sort.Slice(validFlights, func(i, j int) bool {
-		return validFlights[i].Fare < validFlights[j].Fare
+	// 4. Sort: Find cheapest fares first
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Fare < filtered[j].Fare
 	})
 
-	// 4. Limit: Top 5
+	// 5. Select first 5
 	limit := 5
-	if len(validFlights) < 5 {
-		limit = len(validFlights)
+	if len(filtered) < 5 {
+		limit = len(filtered)
 	}
-	finalSelection := validFlights[:limit]
+	finalSelection := filtered[:limit]
 
-	// 5. Notification
+	// 6. Send to Discord
 	if len(finalSelection) > 0 {
 		sendToDiscord(targetDate, finalSelection)
 	}
 
-	// 6. Response for Browser/Logs
+	// Response summary
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"status":"success","date":"%s","found_count":%d}`, targetDate, len(finalSelection))
+	fmt.Fprintf(w, `{"status":"success","date":"%s","valid_flights_found":%d}`, targetDate, len(finalSelection))
 }
 
 func sendToDiscord(date string, flights []IxigoResult) {
@@ -106,11 +108,11 @@ func sendToDiscord(date string, flights []IxigoResult) {
 	payload := map[string]interface{}{
 		"embeds": []interface{}{
 			map[string]interface{}{
-				"title":       fmt.Sprintf("✈️ Top %d Cheapest Flights for %s", len(flights), date),
-				"description": "Route: SXR ➔ BLR",
-				"color":       3066993, // Greenish-Blue
+				"title":       fmt.Sprintf("✈️ 5 Cheapest Verified Flights: %s", date),
+				"description": "SXR ➔ BLR (Excluding empty placeholders)",
+				"color":       3066993,
 				"fields":      fields,
-				"footer":      map[string]interface{}{"text": "Vercel Flight Monitor • " + time.Now().Format("15:04")},
+				"footer":      map[string]interface{}{"text": "Monitor Alert • " + time.Now().Format("15:04")},
 			},
 		},
 	}
