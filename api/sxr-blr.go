@@ -131,7 +131,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func sendToDiscord(centerDate, origin, dest string, flights []IxigoResult) {
-	webhookURL := os.Getenv("DISCORD_WEBHOOK_URL")
+	webhookURL := os.Getenv("DISCORD_WEBHOOK_URL_SXR_BLR")
 	if webhookURL == "" { return }
 
 	var fields []map[string]interface{}
