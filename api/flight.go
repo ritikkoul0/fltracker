@@ -6,16 +6,18 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"time"
 )
 
-// --- Models matching your JSON output ---
+// --- Models ---
 
 type IxigoResult struct {
-	Airline     string  `json:"airline"`
-	AirlineCode string  `json:"airlineCode"`
-	Date        string  `json:"date"`
-	Fare        float64 `json:"fare"`
+	Airline      string  `json:"airline"`
+	AirlineCode  string  `json:"airlineCode"`
+	FlightNumber string  `json:"flightNumber"`
+	Date         string  `json:"date"`
+	Fare         float64 `json:"fare"`
 }
 
 type IxigoResponse struct {
@@ -27,13 +29,11 @@ type IxigoResponse struct {
 }
 
 func Handler(w http.ResponseWriter, r *http.Request) {
-	targetDate := "10-05-2026"
 	url := "https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=10052026&destination=BLR&fareClass=e&origin=SXR&paxCombinationType=100&refundTypes=REFUNDABLE%2CNON_REFUNDABLE%2CPARTIALLY_REFUNDABLE"
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
 
-	// Essential Headers
 	req.Header.Set("apikey", "ixiweb!2$")
 	req.Header.Set("clientid", "ixiweb")
 	req.Header.Set("ixisrc", "ixiweb")
@@ -43,52 +43,74 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		http.Error(w, "API Fail", 500)
+		http.Error(w, "Connection Error", 500)
 		return
 	}
 	defer resp.Body.Close()
 
 	var result IxigoResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		http.Error(w, "JSON Fail", 500)
+		http.Error(w, "JSON Parse Error", 500)
 		return
 	}
 
-	// Filter for your specific date
-	var foundFlight *IxigoResult
+	// 1. Filter out results with 0 fare (invalid data)
+	validFlights := []IxigoResult{}
 	for _, f := range result.Data.Going.Results {
-		if f.Date == targetDate {
-			foundFlight = &f
-			break
+		if f.Fare > 0 {
+			validFlights = append(validFlights, f)
 		}
 	}
 
-	if foundFlight != nil {
-		sendToDiscord(*foundFlight)
+	// 2. Sort by Fare (Ascending)
+	sort.Slice(validFlights, func(i, j int) bool {
+		return validFlights[i].Fare < validFlights[j].Fare
+	})
+
+	// 3. Get Top 5
+	limit := 5
+	if len(validFlights) < 5 {
+		limit = len(validFlights)
+	}
+	cheapestFlights := validFlights[:limit]
+
+	if len(cheapestFlights) > 0 {
+		sendToDiscord(cheapestFlights)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"status":"success","date":"%s","found":%v}`, targetDate, foundFlight != nil)
+	fmt.Fprintf(w, `{"status":"success","sent_to_discord":%d}`, len(cheapestFlights))
 }
 
-func sendToDiscord(f IxigoResult) {
+func sendToDiscord(flights []IxigoResult) {
 	webhookURL := os.Getenv("DISCORD_WEBHOOK_URL")
 	if webhookURL == "" {
 		return
 	}
 
-	// Using the embed style from your Flipkart tracker
+	var fields []map[string]interface{}
+	for _, f := range flights {
+		// Handle empty airline names in ranged view
+		airlineName := f.Airline
+		if airlineName == "" {
+			airlineName = "Multiple/Check Site"
+		}
+
+		fields = append(fields, map[string]interface{}{
+			"name":  fmt.Sprintf("📅 %s", f.Date),
+			"value": fmt.Sprintf("💰 **₹%.0f**\n✈️ %s (%s)", f.Fare, airlineName, f.AirlineCode),
+			"inline": true,
+		})
+	}
+
 	payload := map[string]interface{}{
 		"embeds": []interface{}{
 			map[string]interface{}{
-				"title":       "✈️ Flight Price Alert: SXR ➔ BLR",
-				"description": fmt.Sprintf("Price for **%s**", f.Date),
+				"title":       "📉 Top 5 Cheapest Flights: SXR ➔ BLR",
+				"description": "Found the lowest fares across your selected date range.",
 				"color":       3066993,
-				"fields": []map[string]interface{}{
-					{"name": "💰 Fare", "value": fmt.Sprintf("`₹%.0f`", f.Fare), "inline": true},
-					{"name": "🏢 Airline", "value": f.Airline, "inline": true},
-				},
-				"footer": map[string]interface{}{"text": "Ixigo Monitor • " + time.Now().Format("15:04")},
+				"fields":      fields,
+				"footer":      map[string]interface{}{"text": "Vercel Price Tracker • " + time.Now().Format("15:04")},
 			},
 		},
 	}
