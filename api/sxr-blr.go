@@ -37,7 +37,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	const layout = "02-01-2006"
 	targetStr := "15-05-2026"
 	
-	// Change these per file
+	// Route Configuration
 	origin := "SXR"
 	dest := "BLR"
 
@@ -54,10 +54,9 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	// 2. Fetch Data
 	url := fmt.Sprintf(
 		"https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=%s&destination=%s&fareClass=e&origin=%s&paxCombinationType=100&refundTypes=REFUNDABLE%%2CNON_REFUNDABLE%%2CPARTIALLY_REFUNDABLE",
-		urlDate,
-		dest,
-		origin,
+		urlDate, dest, origin,
 	)
+	
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("apikey", "ixiweb!2$")
@@ -91,7 +90,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return t1.Before(t2)
 	})
 
-	// 4. Redis Logic
+	// 4. Redis Logic (State Comparison)
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
 		http.Error(w, "Missing REDIS_URL", 500)
@@ -107,30 +106,43 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	rdb := redis.NewClient(opts)
 	defer rdb.Close()
 
-	// CREATE A UNIQUE KEY FOR THIS SPECIFIC ROUTE
-	// This prevents File A (BLR-SXR) from overwriting File B (DEL-BOM)
 	stateKey := fmt.Sprintf("flights:%s:%s", origin, dest)
 
-	// Create Price Fingerprint
-	var currentFares []string
+	// Create map of current prices
+	currentPrices := make(map[string]float64)
 	for _, f := range windowFlights {
-		currentFares = append(currentFares, fmt.Sprintf("%.0f", f.Fare))
+		currentPrices[f.Date] = f.Fare
 	}
-	newFingerprint := strings.Join(currentFares, "|")
+	newJSON, _ := json.Marshal(currentPrices)
 
-	// Compare State using the dynamic key
-	oldFingerprint, _ := rdb.Get(ctx, stateKey).Result()
+	// Fetch old prices from Redis
+	oldJSON, _ := rdb.Get(ctx, stateKey).Result()
+	oldPrices := make(map[string]float64)
+	json.Unmarshal([]byte(oldJSON), &oldPrices)
 
-	if newFingerprint != oldFingerprint && len(windowFlights) > 0 {
-		rdb.Set(ctx, stateKey, newFingerprint, 0)
-		sendToDiscord(targetStr, origin, dest, windowFlights)
+	// Detect which specific dates changed
+	hasChanged := false
+	changedDates := make(map[string]bool)
+
+	for date, newFare := range currentPrices {
+		oldFare, exists := oldPrices[date]
+		if !exists || oldFare != newFare {
+			hasChanged = true
+			changedDates[date] = true
+		}
+	}
+
+	// 5. Execution
+	if hasChanged && len(windowFlights) > 0 {
+		rdb.Set(ctx, stateKey, newJSON, 0)
+		sendToDiscord(targetStr, origin, dest, windowFlights, changedDates)
 		w.Write([]byte(`{"status":"success","action":"notified"}`))
 	} else {
 		w.Write([]byte(`{"status":"success","action":"skipped_no_change"}`))
 	}
 }
 
-func sendToDiscord(centerDate, origin, dest string, flights []IxigoResult) {
+func sendToDiscord(centerDate, origin, dest string, flights []IxigoResult, changedDates map[string]bool) {
 	webhookURL := os.Getenv("DISCORD_WEBHOOK_URL_SXR_BLR")
 	if webhookURL == "" { return }
 
@@ -139,8 +151,14 @@ func sendToDiscord(centerDate, origin, dest string, flights []IxigoResult) {
 		airline := f.Airline
 		if airline == "" { airline = "Pending" }
 		
+		// Prefix the date with a red circle if it was one of the prices that changed
+		prefix := ""
+		if changedDates[f.Date] {
+			prefix = "🔴 "
+		}
+
 		fields = append(fields, map[string]interface{}{
-			"name":   fmt.Sprintf("📅 %s", f.Date),
+			"name":   fmt.Sprintf("%s📅 %s", prefix, f.Date),
 			"value":  fmt.Sprintf("💰 **₹%.0f**\n✈️ %s", f.Fare, airline),
 			"inline": true,
 		})
@@ -150,9 +168,12 @@ func sendToDiscord(centerDate, origin, dest string, flights []IxigoResult) {
 		"embeds": []interface{}{
 			map[string]interface{}{
 				"title":       fmt.Sprintf("✈️ Price Update: %s ➔ %s", origin, dest),
-				"description": fmt.Sprintf("Price changes detected for travel around %s", centerDate),
-				"color":       3066993,
+				"description": "Prices marked with 🔴 have updated since the last check.",
+				"color":       15158332, // Red alert color
 				"fields":      fields,
+				"footer": map[string]string{
+					"text": "Based on search window for " + centerDate,
+				},
 			},
 		},
 	}
