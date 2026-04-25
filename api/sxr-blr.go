@@ -37,21 +37,18 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	const layout = "02-01-2006"
 	targetStr := "15-05-2026"
 	
-	// Route Configuration
 	origin := "SXR"
 	dest := "BLR"
 
 	urlDate := strings.ReplaceAll(targetStr, "-", "")
 	centerDate, _ := time.Parse(layout, targetStr)
 
-	// 1. Setup Window (±3 days)
 	allowedDates := make(map[string]bool)
 	for i := -3; i <= 3; i++ {
 		d := centerDate.AddDate(0, 0, i)
 		allowedDates[d.Format(layout)] = true
 	}
 
-	// 2. Fetch Data
 	url := fmt.Sprintf(
 		"https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=%s&destination=%s&fareClass=e&origin=%s&paxCombinationType=100&refundTypes=REFUNDABLE%%2CNON_REFUNDABLE%%2CPARTIALLY_REFUNDABLE",
 		urlDate, dest, origin,
@@ -83,66 +80,57 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 3. Sort Chronologically
 	sort.Slice(windowFlights, func(i, j int) bool {
 		t1, _ := time.Parse(layout, windowFlights[i].Date)
 		t2, _ := time.Parse(layout, windowFlights[j].Date)
 		return t1.Before(t2)
 	})
 
-	// 4. Redis Logic (State Comparison)
+	// --- Redis Logic with Trend Detection ---
 	redisURL := os.Getenv("REDIS_URL")
-	if redisURL == "" {
-		http.Error(w, "Missing REDIS_URL", 500)
-		return
-	}
-
-	opts, err := redis.ParseURL(redisURL)
-	if err != nil {
-		http.Error(w, "Invalid REDIS_URL", 500)
-		return
-	}
-
+	opts, _ := redis.ParseURL(redisURL)
 	rdb := redis.NewClient(opts)
 	defer rdb.Close()
 
 	stateKey := fmt.Sprintf("flights:%s:%s", origin, dest)
 
-	// Create map of current prices
 	currentPrices := make(map[string]float64)
 	for _, f := range windowFlights {
 		currentPrices[f.Date] = f.Fare
 	}
 	newJSON, _ := json.Marshal(currentPrices)
 
-	// Fetch old prices from Redis
 	oldJSON, _ := rdb.Get(ctx, stateKey).Result()
 	oldPrices := make(map[string]float64)
 	json.Unmarshal([]byte(oldJSON), &oldPrices)
 
-	// Detect which specific dates changed
 	hasChanged := false
-	changedDates := make(map[string]bool)
+	trends := make(map[string]string) // Stores 🟢, 🔴, or 🆕
 
 	for date, newFare := range currentPrices {
 		oldFare, exists := oldPrices[date]
-		if !exists || oldFare != newFare {
+		if !exists {
+			trends[date] = "🆕"
 			hasChanged = true
-			changedDates[date] = true
+		} else if newFare < oldFare {
+			trends[date] = "🟢" // Price decreased
+			hasChanged = true
+		} else if newFare > oldFare {
+			trends[date] = "🔴" // Price increased
+			hasChanged = true
 		}
 	}
 
-	// 5. Execution
 	if hasChanged && len(windowFlights) > 0 {
 		rdb.Set(ctx, stateKey, newJSON, 0)
-		sendToDiscord(targetStr, origin, dest, windowFlights, changedDates)
+		sendToDiscord(targetStr, origin, dest, windowFlights, trends)
 		w.Write([]byte(`{"status":"success","action":"notified"}`))
 	} else {
 		w.Write([]byte(`{"status":"success","action":"skipped_no_change"}`))
 	}
 }
 
-func sendToDiscord(centerDate, origin, dest string, flights []IxigoResult, changedDates map[string]bool) {
+func sendToDiscord(centerDate, origin, dest string, flights []IxigoResult, trends map[string]string) {
 	webhookURL := os.Getenv("DISCORD_WEBHOOK_URL_SXR_BLR")
 	if webhookURL == "" { return }
 
@@ -151,14 +139,12 @@ func sendToDiscord(centerDate, origin, dest string, flights []IxigoResult, chang
 		airline := f.Airline
 		if airline == "" { airline = "Pending" }
 		
-		// Prefix the date with a red circle if it was one of the prices that changed
-		prefix := ""
-		if changedDates[f.Date] {
-			prefix = "🔴 "
-		}
+		statusIcon := trends[f.Date]
+		// If no trend (price stayed the same), we can show a neutral icon or nothing
+		if statusIcon == "" { statusIcon = "⚪" }
 
 		fields = append(fields, map[string]interface{}{
-			"name":   fmt.Sprintf("%s📅 %s", prefix, f.Date),
+			"name":   fmt.Sprintf("%s %s", statusIcon, f.Date),
 			"value":  fmt.Sprintf("💰 **₹%.0f**\n✈️ %s", f.Fare, airline),
 			"inline": true,
 		})
@@ -167,13 +153,11 @@ func sendToDiscord(centerDate, origin, dest string, flights []IxigoResult, chang
 	payload := map[string]interface{}{
 		"embeds": []interface{}{
 			map[string]interface{}{
-				"title":       fmt.Sprintf("✈️ Price Update: %s ➔ %s", origin, dest),
-				"description": "Prices marked with 🔴 have updated since the last check.",
-				"color":       15158332, // Red alert color
+				"title":       fmt.Sprintf("✈️ Price Movement: %s ➔ %s", origin, dest),
+				"description": "🟢 Price Down | 🔴 Price Up | 🆕 New | ⚪ Unchanged",
+				"color":       3066993, 
 				"fields":      fields,
-				"footer": map[string]string{
-					"text": "Based on search window for " + centerDate,
-				},
+				"footer":      map[string]string{"text": "Search center: " + centerDate},
 			},
 		},
 	}
