@@ -35,7 +35,7 @@ var ctx = context.Background()
 
 func Handler(w http.ResponseWriter, r *http.Request) {
 	const layout = "02-01-2006"
-	targetStr := "15-05-2026"
+	targetStr := "13-05-2026"
 	
 	origin := "SXR"
 	dest := "BLR"
@@ -44,7 +44,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	centerDate, _ := time.Parse(layout, targetStr)
 
 	allowedDates := make(map[string]bool)
-	for i := -3; i <= 3; i++ {
+	for i := -1; i <= 1; i++ {
 		d := centerDate.AddDate(0, 0, i)
 		allowedDates[d.Format(layout)] = true
 	}
