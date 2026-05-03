@@ -44,10 +44,14 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	centerDate, _ := time.Parse(layout, targetStr)
 
 	allowedDates := make(map[string]bool)
-	for i := -1; i <= 1; i++ {
-		d := centerDate.AddDate(0, 0, i)
-		allowedDates[d.Format(layout)] = true
-	}
+	// for i := -3; i <= 3; i++ {
+	// 	d := centerDate.AddDate(0, 0, i)
+	// 	allowedDates[d.Format(layout)] = true
+	// }
+
+	d := centerDate.AddDate(0, 0, i)
+	allowedDates[d.Format(layout)] = true
+	
 
 	url := fmt.Sprintf(
 		"https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=%s&destination=%s&fareClass=e&origin=%s&paxCombinationType=100&refundTypes=REFUNDABLE%%2CNON_REFUNDABLE%%2CPARTIALLY_REFUNDABLE",
