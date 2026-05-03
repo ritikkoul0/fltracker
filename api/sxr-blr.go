@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -34,25 +33,15 @@ type IxigoResponse struct {
 var ctx = context.Background()
 
 func Handler(w http.ResponseWriter, r *http.Request) {
-	const layout = "02-01-2006"
-	targetStr := "13-05-2026"
-	
+	// 1. Setup Configuration
+	targetDate := "13-05-2026"
 	origin := "SXR"
 	dest := "BLR"
-
-	urlDate := strings.ReplaceAll(targetStr, "-", "")
-	centerDate, _ := time.Parse(layout, targetStr)
-
-	allowedDates := make(map[string]bool)
-	// for i := -3; i <= 3; i++ {
-	// 	d := centerDate.AddDate(0, 0, i)
-	// 	allowedDates[d.Format(layout)] = true
-	// }
-
-	d := centerDate.AddDate(0, 0, i)
-	allowedDates[d.Format(layout)] = true
 	
+	// Format date for the API URL (removes dashes)
+	urlDate := strings.ReplaceAll(targetDate, "-", "")
 
+	// 2. Fetch Data from Ixigo
 	url := fmt.Sprintf(
 		"https://www.ixigo.com/outlook/v1/onward/ranged?departureDate=%s&destination=%s&fareClass=e&origin=%s&paxCombinationType=100&refundTypes=REFUNDABLE%%2CNON_REFUNDABLE%%2CPARTIALLY_REFUNDABLE",
 		urlDate, dest, origin,
@@ -77,79 +66,76 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var windowFlights []IxigoResult
+	// 3. Filter for ONLY the target date
+	var flightResults []IxigoResult
 	for _, f := range rawResponse.Data.Going.Results {
-		if allowedDates[f.Date] {
-			windowFlights = append(windowFlights, f)
+		if f.Date == targetDate {
+			flightResults = append(flightResults, f)
 		}
 	}
 
-	sort.Slice(windowFlights, func(i, j int) bool {
-		t1, _ := time.Parse(layout, windowFlights[i].Date)
-		t2, _ := time.Parse(layout, windowFlights[j].Date)
-		return t1.Before(t2)
-	})
-
-	// --- Redis Logic with Trend Detection ---
+	// 4. Redis State Management & Trend Detection
 	redisURL := os.Getenv("REDIS_URL")
 	opts, _ := redis.ParseURL(redisURL)
 	rdb := redis.NewClient(opts)
 	defer rdb.Close()
 
-	stateKey := fmt.Sprintf("flights:%s:%s", origin, dest)
+	// Unique key for this specific route and date
+	stateKey := fmt.Sprintf("flights:%s:%s:%s", origin, dest, targetDate)
 
+	// Map of FlightNumber -> Fare for comparison
 	currentPrices := make(map[string]float64)
-	for _, f := range windowFlights {
-		currentPrices[f.Date] = f.Fare
+	for _, f := range flightResults {
+		currentPrices[f.FlightNumber] = f.Fare
 	}
 	newJSON, _ := json.Marshal(currentPrices)
 
+	// Fetch previous state
 	oldJSON, _ := rdb.Get(ctx, stateKey).Result()
 	oldPrices := make(map[string]float64)
 	json.Unmarshal([]byte(oldJSON), &oldPrices)
 
 	hasChanged := false
-	trends := make(map[string]string) // Stores 🟢, 🔴, or 🆕
+	trends := make(map[string]string) 
 
-	for date, newFare := range currentPrices {
-		oldFare, exists := oldPrices[date]
+	for _, f := range flightResults {
+		oldFare, exists := oldPrices[f.FlightNumber]
 		if !exists {
-			trends[date] = "🆕"
+			trends[f.FlightNumber] = "🆕"
 			hasChanged = true
-		} else if newFare < oldFare {
-			trends[date] = "🟢" // Price decreased
+		} else if f.Fare < oldFare {
+			trends[f.FlightNumber] = "🟢" // Price dropped
 			hasChanged = true
-		} else if newFare > oldFare {
-			trends[date] = "🔴" // Price increased
+		} else if f.Fare > oldFare {
+			trends[f.FlightNumber] = "🔴" // Price rose
 			hasChanged = true
+		} else {
+			trends[f.FlightNumber] = "⚪" // No change
 		}
 	}
 
-	if hasChanged && len(windowFlights) > 0 {
+	// 5. Notify if changes detected
+	if hasChanged && len(flightResults) > 0 {
 		rdb.Set(ctx, stateKey, newJSON, 0)
-		sendToDiscord(targetStr, origin, dest, windowFlights, trends)
+		sendToDiscord(targetDate, origin, dest, flightResults, trends)
 		w.Write([]byte(`{"status":"success","action":"notified"}`))
 	} else {
 		w.Write([]byte(`{"status":"success","action":"skipped_no_change"}`))
 	}
 }
 
-func sendToDiscord(centerDate, origin, dest string, flights []IxigoResult, trends map[string]string) {
+func sendToDiscord(date, origin, dest string, flights []IxigoResult, trends map[string]string) {
 	webhookURL := os.Getenv("DISCORD_WEBHOOK_URL_SXR_BLR")
 	if webhookURL == "" { return }
 
 	var fields []map[string]interface{}
 	for _, f := range flights {
 		airline := f.Airline
-		if airline == "" { airline = "Pending" }
+		if airline == "" { airline = f.AirlineCode }
 		
-		statusIcon := trends[f.Date]
-		// If no trend (price stayed the same), we can show a neutral icon or nothing
-		if statusIcon == "" { statusIcon = "⚪" }
-
 		fields = append(fields, map[string]interface{}{
-			"name":   fmt.Sprintf("%s %s", statusIcon, f.Date),
-			"value":  fmt.Sprintf("💰 **₹%.0f**\n✈️ %s", f.Fare, airline),
+			"name":   fmt.Sprintf("%s %s (%s)", trends[f.FlightNumber], airline, f.FlightNumber),
+			"value":  fmt.Sprintf("💰 **₹%.0f**", f.Fare),
 			"inline": true,
 		})
 	}
@@ -157,11 +143,11 @@ func sendToDiscord(centerDate, origin, dest string, flights []IxigoResult, trend
 	payload := map[string]interface{}{
 		"embeds": []interface{}{
 			map[string]interface{}{
-				"title":       fmt.Sprintf("✈️ Price Movement: %s ➔ %s", origin, dest),
-				"description": "🟢 Price Down | 🔴 Price Up | 🆕 New | ⚪ Unchanged",
+				"title":       fmt.Sprintf("✈️ Price Update: %s ➔ %s", origin, dest),
+				"description": fmt.Sprintf("Monitoring Date: **%s**\n🟢 Down | 🔴 Up | 🆕 New | ⚪ Flat", date),
 				"color":       3066993, 
 				"fields":      fields,
-				"footer":      map[string]string{"text": "Search center: " + centerDate},
+				"footer":      map[string]string{"text": "Ixigo Flight Tracker"},
 			},
 		},
 	}
