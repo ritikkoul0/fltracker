@@ -34,9 +34,9 @@ var ctx = context.Background()
 
 func Handler(w http.ResponseWriter, r *http.Request) {
 	// 1. Setup Configuration
-	targetDate := "13-05-2026"
-	origin := "SXR"
-	dest := "BLR"
+	targetDate := "19-05-2026"
+	origin := "BLR"
+	dest := "SXR"
 	
 	// Format date for the API URL (removes dashes)
 	urlDate := strings.ReplaceAll(targetDate, "-", "")
