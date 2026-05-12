@@ -36,7 +36,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	// 1. Config for Return Flight
 	const targetDate = "18-05-2026"
 	const origin = "BLR"
-	const dest = "SXR"
+	const dest = "IXJ"
 	
 	urlDate := strings.ReplaceAll(targetDate, "-", "")
 
